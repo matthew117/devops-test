@@ -51,5 +51,5 @@ terraform pipeline and therefore cannot uses variables, including those set with
 
 You must provide these arguments to the `terraform` command like so
 ```
-terraform -backend-config="storage_account_name=<storage account name>" -backend-config="access_key=<storage account key>"
+terraform init -backend-config="storage_account_name=<storage account name>" -backend-config="access_key=<storage account key>"
 ```

@@ -1,0 +1,98 @@
+trigger:
+- dev
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  BuildConfiguration: 'Release'
+  TF_VAR_tfBackendStorageAccount: 'mbatesstorage'
+  TF_VAR_azurermSubscriptionId: 'f36785f6-3ba3-4c60-87c7-d96904951028'
+  TF_VAR_azurermClientId: '89d9a59f-5c44-449e-8f8f-cf0b80d57cd4'
+  TF_VAR_azurermTenantId: '9721b26c-d0c9-4b60-a158-35c6ebac32d2'
+  TF_VAR_adminUsername: 'mbates'
+
+steps:
+  # There is a transform JSON/XML task but it uses variables rather than secrets
+- bash: |
+    jq --arg a "$(RANDOMCONFIG_SECRET_VALUE)" '.RandomConfig.Secret.Value = $a' appsettings.json > tmp
+    mv tmp appsettings.json
+  displayName: 'Update appsettings.json'
+
+- task: DotNetCoreCLI@2
+  displayName: 'Restore API Dependencies'
+  inputs:
+    command: restore
+    projects: '**/*.csproj'
+
+- task: DotNetCoreCLI@2
+  displayName: 'Build .NET Core API'
+  inputs:
+    command: build
+    projects: '**/*.csproj'
+    arguments: '--configuration $(BuildConfiguration)'
+
+- task: DotNetCoreCLI@2
+  displayName: 'Publish .NET Core API'
+  inputs:
+    command: publish
+    publishWebProjects: True
+    arguments: '--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+    zipAfterPublish: false
+
+# The shh key needed by terraform is stored in the secure file library
+- task: DownloadSecureFile@1
+  name: sshPublicKey
+  displayName: 'Download SSH Public Key'
+  inputs:
+    secureFile: 'id_rsa.pub'
+- task: DownloadSecureFile@1
+  name: sshPrivateKey
+  displayName: 'Download SSH Private Key'
+  inputs:
+    secureFile: 'id_rsa'
+
+# the storage backend config needs passed in through the CLI since it cannot be read from environment variables
+- bash: |
+    terraform version
+    terraform init -backend-config="storage_account_name=$(TF_VAR_tfBackendStorageAccount)" -backend-config="access_key=$(TF_VAR_tfBackendStorageKey)"
+  displayName: 'Terraform Init'
+  workingDirectory: terraform
+
+# detailed output codes will let us skip pipeline steps based on conditionals
+- bash: |
+    terraform plan -out=tfplan -detailed-exitcode
+    echo "##vso[task.setvariable variable=StatusCode;isoutput=true]$(echo $?)"
+    echo "##vso[task.setvariable variable=IpAddress;isoutput=true]$(terraform output -raw ip_address)"
+  displayName: 'Terraform Plan'
+  name: "TerraformPlan"
+  workingDirectory: terraform
+  # terraform needs these environment variables
+  # some are defined as secrets whilst others are defined as variables for convenience
+  # these could be overridden to configure where the app is deployed for example
+  env:
+    TF_VAR_tfBackendStorageAccount: $(TF_VAR_tfBackendStorageAccount)
+    TF_VAR_tfBackendStorageKey: $(TF_VAR_tfBackendStorageKey)
+    TF_VAR_azurermSubscriptionId: $(TF_VAR_azurermSubscriptionId)
+    TF_VAR_azurermClientId: $(TF_VAR_azurermClientId)
+    TF_VAR_azurermClientSecret: $(TF_VAR_azurermClientSecret)
+    TF_VAR_azurermTenantId: $(TF_VAR_azurermTenantId)
+    TF_VAR_adminUsername: $(TF_VAR_adminUsername)
+    TF_VAR_adminPassword: $(TF_VAR_adminPassword)
+    TF_VAR_sshPublicKeyPath: $(sshPublicKey.secureFilePath)
+
+- bash: terraform apply tfplan
+  displayName: 'Terraform Apply'
+  workingDirectory: terraform
+  condition: eq(variables['TerraformPlan.StatusCode'], 2)
+
+- bash: |
+    chmod 0400 $(sshPrivateKey.secureFilePath)
+    chmod 0400 $(sshPublicKey.secureFilePath)
+    scp -o StrictHostKeyChecking=no -i $(sshPrivateKey.secureFilePath) -r $(Build.ArtifactStagingDirectory)/s/* $(TF_VAR_adminUsername)@$(TerraformPlan.IpAddress):/home/$(TF_VAR_adminUsername)/app/
+  displayName: 'Deploy Application'
+
+- bash: |
+    test_result=$(curl -s http://$(TerraformPlan.IpAddress)/api/v1/devops/build/$(Build.BuildId))
+    echo $test_result
+  displayName: 'Verify Installation'

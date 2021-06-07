@@ -115,14 +115,12 @@ resource "azurerm_network_security_group" "dev" {
     access                = "Allow"
     protocol              = "TCP"
     source_address_prefix = "*"
-    source_port_ranges = [
-      5000,
-      5001
-    ]
+    source_port_range = "*"
     destination_address_prefix = azurerm_subnet.dev.address_prefix
     destination_port_ranges = [
       5000,
-      5001
+      5001,
+      80
     ]
   }
 
